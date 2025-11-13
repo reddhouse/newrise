@@ -1,0 +1,268 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Clickable Tables — persistent on iOS</title>
+  <style>
+    :root{
+      --cell-size: 28px;   /* reduced height */
+      --gap: 2px;          /* minimal vertical gap */
+      --muted: #f7f8f9;
+    }
+
+    /* overall tighter layout */
+    html,body{ height:100%; }
+    body{
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui;
+      margin:6px;
+      color:#111;
+      -webkit-font-smoothing:antialiased;
+      -webkit-text-size-adjust:100%;
+    }
+
+    header{
+      display:flex;
+      gap:6px;
+      margin-bottom:2px;   /* minimal vertical spacing */
+      align-items:center;
+    }
+
+    button{
+      padding:4px 6px;    /* smaller buttons */
+      border-radius:6px;
+      border:1px solid #ddd;
+      background:white;
+      font-size:12px;
+      line-height:1;
+    }
+
+    .list { display:flex; flex-direction:column; gap:2px; } /* only 2px between items */
+
+    /* items should have no visible border and minimal vertical padding */
+    .item {
+      background:transparent;   /* no border / container visual */
+      border: none;
+      border-radius: 0;
+      overflow: visible;
+      padding: 0;
+      margin: 0;
+    }
+
+    /* simplified item-head: single-line title with very small padding */
+    .item-head { padding:4px 6px; }
+    .item-title { font-weight:600; font-size:13px; margin:0; }
+
+    /* item body always visible, minimal vertical padding */
+    .item-body { padding:2px 6px 4px 6px; display:block; }
+
+    table{
+      border-collapse:collapse;
+      width:100%;
+      user-select:none;
+      touch-action: manipulation;
+      table-layout: fixed;
+      margin:0;
+    }
+
+    /* smaller cells, minimal vertical spacing */
+    td{
+      border:1px solid #ececec;
+      width:calc(100% / 22);
+      height:var(--cell-size);
+      text-align:center;
+      vertical-align:middle;
+      font-size:12px;
+      background:var(--muted);
+      color:#333;
+      padding:2px 0;
+      box-sizing:border-box;
+    }
+
+    td.active{ background: var(--active-color); color: white; }
+    td:focus{ outline:2px solid rgba(0,0,0,0.06); outline-offset:-2px; }
+
+    .controls{ display:flex; gap:6px; flex-wrap:wrap; }
+    .small{ font-size:12px; padding:4px 6px; }
+    .hint{ color:#666; font-size:12px; margin-top:2px; }
+    input[type=file]{ display:none; }
+
+    /* reduce default spacing for header content */
+    header > div[style] { margin:0; padding:0; }
+  </style>
+</head>
+<body>
+  <header>
+    <div style="flex:1">
+      <strong style="font-size:14px">Clickable Tables — persistent</strong>
+      <div class="hint">Tap a numbered cell to toggle it. State is saved locally and each column has a consistent color.</div>
+    </div>
+    <div class="controls">
+      <button id="exportBtn" class="small">Export</button>
+      <button id="importBtn" class="small">Import</button>
+      <input id="importFile" type="file" accept="application/json" />
+      <button id="clearBtn" class="small">Clear</button>
+    </div>
+  </header>
+
+  <main>
+    <div id="list" class="list" aria-live="polite"></div>
+  </main>
+
+  <script>
+    // CONFIG
+    const NUM_ITEMS = 25;       // list length
+    const ROWS = 1;
+    const COLS = 22;
+    const STORAGE_KEY = 'clickable-tables:v1';
+
+    function colorForCol(c) {
+      // spread colors using the golden angle to avoid adjacent-similar hues
+      const golden = 137.50776405003785; // degrees
+      const hue = (c * golden) % 360;
+      // fixed saturation/lightness for good contrast between adjacent columns
+      const sat = 62; // %
+      const light = 48; // %
+      return `hsl(${Math.round(hue)} ${sat}% ${light}%)`;
+    }
+
+    function makeId(i){ return 'item-' + (i+1); }
+
+    let state = loadState();
+
+    const listEl = document.getElementById('list');
+
+    function render() {
+      listEl.innerHTML = '';
+      for (let i = 0; i < NUM_ITEMS; i++) {
+        const id = makeId(i);
+        const item = document.createElement('section');
+        item.className = 'item';
+        item.dataset.id = id;
+
+        const head = document.createElement('div');
+        head.className = 'item-head';
+        head.innerHTML = `<div class="item-title">Item ${i+1}</div>`;
+
+        const body = document.createElement('div');
+        body.className = 'item-body';
+
+        const table = document.createElement('table');
+        const tr = document.createElement('tr');
+        for (let c = 0; c < COLS; c++) {
+          const td = document.createElement('td');
+          td.dataset.c = c;
+          td.tabIndex = 0;
+          td.role = 'button';
+          td.ariaLabel = `Item ${i+1} column ${c+1}`;
+          td.textContent = `${c+1}`;
+          td.style.setProperty('--active-color', colorForCol(c));
+          const key = cellKey(id, 0, c);
+          if (state[id] && state[id].cells && state[id].cells[key]) td.classList.add('active');
+
+          td.addEventListener('click', () => toggleCell(id, 0, c, td));
+          td.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleCell(id, 0, c, td); }});
+          tr.appendChild(td);
+        }
+        table.appendChild(tr);
+        body.appendChild(table);
+
+        item.appendChild(head);
+        item.appendChild(body);
+        listEl.appendChild(item);
+      }
+    }
+
+    function cellKey(id, r, c){ return `${c}`; } // use column index as key
+
+    function toggleCell(itemId, r, c, tdEl) {
+      const k = cellKey(itemId, r, c);
+      if (!state[itemId]) state[itemId] = { cells: {} };
+      const cells = state[itemId].cells;
+      if (cells[k]) {
+        delete cells[k];
+        tdEl.classList.remove('active');
+      } else {
+        cells[k] = true;
+        tdEl.classList.add('active');
+      }
+      saveState();
+    }
+
+    function loadState(){
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        return raw ? JSON.parse(raw) : {};
+      } catch (e) {
+        console.error('Failed to load state', e);
+        return {};
+      }
+    }
+
+    function saveState(){
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      } catch (e) {
+        console.error('Failed to save state', e);
+      }
+    }
+
+    document.getElementById('exportBtn').addEventListener('click', async () => {
+      const payload = { exportedAt: new Date().toISOString(), state };
+      const blob = new Blob([JSON.stringify(payload, null, 2)], {type:'application/json'});
+      const filename = 'clickable-tables-state.json';
+
+      if (navigator.canShare && navigator.canShare({ files: [new File([blob], filename)] })) {
+        try {
+          await navigator.share({ files: [new File([blob], filename)], title: 'Export state' });
+          return;
+        } catch (e) { /* fall back */ }
+      }
+
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    });
+
+    const importFile = document.getElementById('importFile');
+    document.getElementById('importBtn').addEventListener('click', () => importFile.click());
+    importFile.addEventListener('change', (ev) => {
+      const f = ev.target.files && ev.target.files[0];
+      if (!f) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        try {
+          const parsed = JSON.parse(reader.result);
+          if (parsed && parsed.state) {
+            state = parsed.state;
+            saveState();
+            render();
+            alert('State imported');
+          } else {
+            alert('Invalid file format');
+          }
+        } catch (e) {
+          alert('Could not parse file');
+        }
+      };
+      reader.readAsText(f);
+      importFile.value = '';
+    });
+
+    document.getElementById('clearBtn').addEventListener('click', () => {
+      if (!confirm('Clear saved state?')) return;
+      state = {};
+      saveState();
+      render();
+    });
+
+    // INITIALIZE
+    render();
+  </script>
+</body>
+</html>
